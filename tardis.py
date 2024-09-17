@@ -43,7 +43,10 @@ class NiftiViewer(QMainWindow):
         self.resize(int(self.screen_width * 0.8), int(self.screen_height * 0.8))  # Resize window to 80% of screen size
 
     def closeEvent(self, a0):
-        clean_nifti_dir()
+        try:
+            clean_nifti_dir()
+        except:
+            pass
         a0.accept()
 
     def init_ui(self):
