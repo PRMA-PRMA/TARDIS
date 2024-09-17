@@ -1,7 +1,7 @@
 import sys
 import nibabel as nib
 import numpy as np
-import SimpleITK as sitk
+import SimpleITK as sitk  # Ensure SimpleITK is installed for this
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from PyQt5.QtWidgets import QMainWindow, QApplication, QVBoxLayout, QPushButton, QSlider, QWidget, QLabel, QHBoxLayout, \
@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import QMainWindow, QApplication, QVBoxLayout, QPushButton,
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QIcon, QPixmap
 import os
+from app_utils import handle_file_upload, extract_slice, clean_nifti_dir
 
 
 class NiftiViewer(QMainWindow):
@@ -40,6 +41,10 @@ class NiftiViewer(QMainWindow):
         self.screen_height = self.screen_resolution.height()
 
         self.resize(int(self.screen_width * 0.8), int(self.screen_height * 0.8))  # Resize window to 80% of screen size
+
+    def closeEvent(self, a0):
+        clean_nifti_dir()
+        a0.accept()
 
     def init_ui(self):
         # Main widget
@@ -173,6 +178,7 @@ class NiftiViewer(QMainWindow):
 
             # Switch between 3D and CINE modes based on file type
             self.switch_mode(nii_file)
+
         except Exception as e:
             print(f"Error loading file: {file_path}\n{e}")
 
@@ -181,12 +187,13 @@ class NiftiViewer(QMainWindow):
         try:
             filename = os.path.basename(file_path)
             nii_file = self.uploaded_files[filename]
-            middle_slice = self.extract_slice(nii_file)
+            middle_slice = extract_slice(nii_file)
 
             # Create thumbnail image
-            fig, ax = plt.subplots(figsize=(2, 2))
+            fig, ax = plt.subplots(figsize=(1.7, 1.7))
             ax.imshow(middle_slice, cmap='gray')
             ax.axis('off')
+            fig.patch.set_facecolor("black")
             plt.tight_layout()
 
             # Convert the plot to a canvas and use it as a thumbnail
@@ -233,23 +240,6 @@ class NiftiViewer(QMainWindow):
             self.switch_mode(nii_file)
         except Exception as e:
             print(f"Error activating file: {file_path}\n{e}")
-
-    def extract_slice(self, nii_file):
-        """Extract a single slice from the NIfTI file, handling 3D or 4D cases."""
-        data = nii_file.get_fdata()
-        shape = data.shape
-
-        # Handle different shapes (2D, 3D, 4D)
-        if len(shape) == 2:  # 2D image
-            return data
-        elif len(shape) == 3:  # 3D image, take the middle slice
-            return data[:, :, shape[2] // 2]
-        elif len(shape) == 4 and shape[3] == 1:  # 3D image with 4D shape
-            return data[:, :, shape[2] // 2, 0]
-        elif len(shape) == 4:  # 4D image (CINE)
-            return data[:, :, shape[2] // 2, 0]
-        else:
-            raise ValueError(f"Invalid shape {shape} for image data")
 
     def wheelEvent(self, event):
         """Handle mouse wheel events for scrolling through frames or slices."""
@@ -378,10 +368,15 @@ class NiftiViewer(QMainWindow):
         self.setStyleSheet("background-color: white; color: black;")
 
     def upload_file(self):
-        """Allow users to upload additional files."""
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select NIfTI File", "", "NIfTI Files (*.nii *.nii.gz)")
+        """Allow users to upload either NIfTI or DICOM files."""
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select File", "",
+                                                   "All Files (*);;NIfTI Files (*.nii *.nii.gz);;DICOM Files (*.dcm *.DCM)")
+
         if file_path:
-            self.load_nifti_file(file_path)
+            nifti_file_path = handle_file_upload(file_path)
+            if nifti_file_path:
+                # Load the NIfTI file after handling
+                self.load_nifti_file(nifti_file_path)
 
 
 if __name__ == '__main__':
