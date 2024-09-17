@@ -17,6 +17,7 @@ class NiftiViewer(QMainWindow):
         super().__init__()
 
         # Dictionary to store all uploaded files (filename -> NIfTI object)
+        self.current_file = None  # Initialize current file
         self.uploaded_files = {}
 
         # If there's an initial file, load it
@@ -65,8 +66,9 @@ class NiftiViewer(QMainWindow):
         self.scroll_widget.setLayout(self.scroll_layout)
         self.scroll_area.setWidget(self.scroll_widget)
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFixedWidth(200)  # Set a fixed width for the thumbnail area
+        self.scroll_area.setFixedWidth(250)  # Set a fixed width for the thumbnail area
         self.main_layout.addWidget(self.scroll_area)
+        self.thumbnail_widgets = {}  # Dictionary to store the thumbnails with their corresponding filenames
 
         # Right side for image display and controls
         self.right_layout = QVBoxLayout()
@@ -155,8 +157,7 @@ class NiftiViewer(QMainWindow):
         """Load the NIfTI file and update the main image display."""
         try:
             nii_file = nib.load(file_path)
-            self.uploaded_files[os.path.basename(file_path)] = nii_file
-            self.add_thumbnail(file_path)
+            self.add_thumbnail(file_path)  # Now, let add_thumbnail handle the addition to uploaded_files
 
             if len(self.uploaded_files) == 1:
                 # Load the first file by default
@@ -186,10 +187,19 @@ class NiftiViewer(QMainWindow):
             print(f"Error loading file: {file_path}\n{e}")
 
     def add_thumbnail(self, file_path):
-        """Create a thumbnail for the file and add it to the sidebar."""
+        """Create a thumbnail for the file and add it to the sidebar with a delete button."""
         try:
             filename = os.path.basename(file_path)
-            nii_file = self.uploaded_files[filename]
+
+            # Only add the file if it hasn't already been added
+            if filename in self.uploaded_files:
+                print("uploaded Files:", self.uploaded_files)
+                #print(f"File {filename} was previously added. Ensuring full cleanup before re-adding.")
+                self.delete_file(file_path)  # Clean up if the file was previously added
+
+            # Now, add the file to the dictionary of uploaded files after the check
+            nii_file = nib.load(file_path)
+            self.uploaded_files[filename] = nii_file
             middle_slice = extract_slice(nii_file)
 
             # Create thumbnail image
@@ -212,12 +222,88 @@ class NiftiViewer(QMainWindow):
             thumbnail_button.setIcon(thumbnail_icon)  # Set as QIcon, not QPixmap
             thumbnail_button.setIconSize(thumbnail_pixmap.size())  # Adjust the size
             thumbnail_button.clicked.connect(lambda: self.select_file_by_thumbnail(file_path))  # Ensure mode switching
-            # Add the thumbnail to the grid layout in the scroll area
+
+            # Store file_path as a property for easier matching
+            thumbnail_button.setProperty("file_path", file_path)
+
+            # Create delete button
+            delete_button = QPushButton("X")  # Simple 'X' button for delete
+            delete_button.setFixedSize(20, 20)  # Set a small size for the delete button
+            delete_button.clicked.connect(lambda: self.delete_file(file_path))  # Connect to delete function
+
+            # Create a layout for the thumbnail and delete button
+            thumbnail_layout = QHBoxLayout()
+            thumbnail_layout.addWidget(thumbnail_button)
+            thumbnail_layout.addWidget(delete_button)
+
+            # Create a container widget to hold both buttons
+            thumbnail_container = QWidget()
+            thumbnail_container.setLayout(thumbnail_layout)
+
+            # Add the thumbnail container directly to the scroll layout
             row = len(self.uploaded_files) - 1
-            self.scroll_layout.addWidget(thumbnail_button, row, 0)
+            self.scroll_layout.addWidget(thumbnail_container, row, 0)
 
         except Exception as e:
             print(f"Error creating thumbnail for file: {file_path}\n{e}")
+
+    def delete_file(self, file_path):
+        """Delete the selected file and remove it from the view without deleting from disk."""
+        try:
+            #print(f"Attempting to delete file: {file_path}")
+            # Get the filename and remove the file from the dictionary of uploaded files
+            filename = os.path.basename(file_path)
+
+            if filename in self.uploaded_files:
+                del self.uploaded_files[filename]
+                #print(f"Removed {filename} from uploaded_files")
+            else:
+                pass
+                #print(f"File {filename} not found in uploaded_files")
+
+            # Iterate over the layout to find and remove the thumbnail widget
+            for i in reversed(range(self.scroll_layout.count())):
+                widget_item = self.scroll_layout.itemAt(i)
+                if widget_item is not None:
+                    widget = widget_item.widget()  # Get the actual widget from QLayoutItem
+                    if widget is not None and widget.layout() is not None:
+                        thumbnail_button = widget.layout().itemAt(0).widget()
+                        stored_file_path = thumbnail_button.property("file_path")  # Retrieve stored file path
+
+                        # Check if this is the correct widget by comparing the file_path
+                        if stored_file_path == file_path:
+                            #print(f"Match found! Removing widget for {file_path}")
+                            removed_widget = self.scroll_layout.takeAt(i).widget()
+                            if removed_widget:
+                                removed_widget.setParent(None)  # Remove widget from layout
+                                removed_widget.deleteLater()  # Schedule it for deletion
+                                #print(f"Widget removed for {file_path}")
+
+            # Clear current_file if it matches the deleted file
+            if self.current_file == file_path:
+                self.current_file = None
+                self.ax.clear()
+                self.canvas.draw()
+                self.setWindowTitle('NIfTI Viewer - No File Selected')
+                print(f"Cleared display for {file_path}")
+
+            # Refresh the layout after deleting
+            self.refresh_thumbnail_layout()
+
+        except Exception as e:
+            print(f"Error deleting file: {e}")
+
+    def refresh_thumbnail_layout(self):
+        """Clear the layout and rebuild it with the remaining thumbnails."""
+        # Clear all the items from the layout
+        for i in reversed(range(self.scroll_layout.count())):
+            item = self.scroll_layout.takeAt(i)
+            if item.widget():
+                item.widget().deleteLater()
+
+        # Rebuild the layout by re-adding all the current thumbnails
+        for row, filename in enumerate(self.uploaded_files.keys()):
+            self.add_thumbnail(self.uploaded_files[filename].get_filename())  # Re-add the thumbnail
 
     def select_file_by_thumbnail(self, file_path):
         """Handle file selection by clicking on a thumbnail."""
