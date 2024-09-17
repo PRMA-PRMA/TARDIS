@@ -2,7 +2,7 @@
 
 ## Overview
 
-TARDIS (Temporal Analysis and Radiological Display Interactive System) is a lightweight, local, web-app-like viewer for NIfTI (Neuroimaging Informatics Technology Initiative) files. It supports both CINE (4D) and traditional 3D NIfTI formats, providing a user-friendly interface for medical imaging professionals and researchers to view and interact with neuroimaging data.
+TARDIS (Temporal Analysis and Radiological Display Interactive System) is a lightweight, local, web-app-like viewer for NIfTI (Neuroimaging Informatics Technology Initiative) files. It supports both CINE (4D) and traditional 3D NIfTI formats, providing a user-friendly interface for medical imaging professionals and researchers to view and interact with imaging data.
 
 ## Features
 
