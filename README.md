@@ -36,20 +36,20 @@ To convert DICOM to NIfTI, you will need to install `dcm2niix`:
 - For Ubuntu:
   ```
   bash sudo apt-get install dcm2niix
-  '''
-
+  ```
+  
 - For macOS (via Homebrew):
-  '''
+  ```
   brew install dcm2niix
-  """
-
+  ```
+  
 - For Windows:
   You can download and install from [here](https://github.com/rordenlab/dcm2niix/releases)
 
   Alternatively, pip or conda can be used
-  '''
+  ```
   pip install dcm2niix
-  '''
+  ```
 
 
 ### Download
