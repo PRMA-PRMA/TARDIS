@@ -4,12 +4,111 @@ import numpy as np
 import SimpleITK as sitk  # Ensure SimpleITK is installed for this
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from PyQt5.QtWidgets import QMainWindow, QApplication, QVBoxLayout, QPushButton, QSlider, QWidget, QLabel, QHBoxLayout, \
-    QCheckBox, QScrollArea, QGridLayout, QFileDialog, QSizePolicy, QDesktopWidget
+from PyQt5.QtWidgets import (QMainWindow, QApplication, QVBoxLayout, QPushButton, QSlider, QWidget, QLabel,
+                             QHBoxLayout, QCheckBox, QScrollArea, QGridLayout, QFileDialog, QSizePolicy,
+                             QDesktopWidget, QMenuBar, QAction, QMessageBox, QDialog, QLineEdit)
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QIcon, QPixmap
 import os
 from app_utils import handle_file_upload, extract_slice, clean_nifti_dir
+
+
+class ResamplingDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Resampling Options")
+        self.setModal(True)
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout()
+
+        # Resampling Factor Input
+        factor_layout = QHBoxLayout()
+        factor_label = QLabel("Resampling Factor:")
+        self.factor_input = QLineEdit()
+        self.factor_input.setPlaceholderText("e.g., 2")
+        factor_layout.addWidget(factor_label)
+        factor_layout.addWidget(self.factor_input)
+        layout.addLayout(factor_layout)
+
+        # Buttons
+        buttons_layout = QHBoxLayout()
+        apply_button = QPushButton("Apply")
+        cancel_button = QPushButton("Cancel")
+        apply_button.clicked.connect(self.apply)
+        cancel_button.clicked.connect(self.reject)
+        buttons_layout.addWidget(apply_button)
+        buttons_layout.addWidget(cancel_button)
+        layout.addLayout(buttons_layout)
+
+        self.setLayout(layout)
+
+    def apply(self):
+        try:
+            factor = float(self.factor_input.text())
+            if factor <= 0:
+                raise ValueError("Factor must be positive.")
+            self.factor = factor
+            self.accept()
+        except ValueError as e:
+            QMessageBox.warning(self, "Invalid Input", f"Please enter a valid resampling factor.\nError: {e}")
+
+
+class IntensityNormalizationDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Intensity Normalization Options")
+        self.setModal(True)
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout()
+
+        # Minimum Intensity Input
+        min_layout = QHBoxLayout()
+        min_label = QLabel("Minimum Intensity:")
+        self.min_input = QLineEdit()
+        self.min_input.setPlaceholderText("e.g., 0")
+        min_layout.addWidget(min_label)
+        min_layout.addWidget(self.min_input)
+        layout.addLayout(min_layout)
+
+        # Maximum Intensity Input
+        max_layout = QHBoxLayout()
+        max_label = QLabel("Maximum Intensity:")
+        self.max_input = QLineEdit()
+        self.max_input.setPlaceholderText("e.g., 255")
+        max_layout.addWidget(max_label)
+        max_layout.addWidget(self.max_input)
+        layout.addLayout(max_layout)
+
+        # Buttons
+        buttons_layout = QHBoxLayout()
+        apply_button = QPushButton("Apply")
+        cancel_button = QPushButton("Cancel")
+        apply_button.clicked.connect(self.apply)
+        cancel_button.clicked.connect(self.reject)
+        buttons_layout.addWidget(apply_button)
+        buttons_layout.addWidget(cancel_button)
+        layout.addLayout(buttons_layout)
+
+        self.setLayout(layout)
+
+    def apply(self):
+        try:
+            min_val = float(self.min_input.text())
+            max_val = float(self.max_input.text())
+            if min_val >= max_val:
+                raise ValueError("Minimum must be less than maximum.")
+            self.min_val = min_val
+            self.max_val = max_val
+            self.accept()
+        except ValueError as e:
+            QMessageBox.warning(self, "Invalid Input", f"Please enter valid intensity values.\nError: {e}")
+
+
+# Similarly, create RegistrationDialog, DenoisingDialog, and ROTrackingDialog
 
 
 class NiftiViewer(QMainWindow):
@@ -95,14 +194,209 @@ class NiftiViewer(QMainWindow):
         # Apply default dark mode
         self.apply_dark_mode()
 
-    def resizeEvent(self, event):
-        """Dynamically resize the canvas and keep the image centered."""
-        canvas_width, canvas_height = self.canvas.width(), self.canvas.height()
-        # Resize the figure based on canvas size
-        self.figure.set_size_inches(canvas_width / self.figure.dpi, canvas_height / self.figure.dpi, forward=True)
-        self.ax.set_anchor('C')  # Keep the image centered
-        if hasattr(self, 'img_data'):  # Check if img_data is initialized
-            self.update_image()  # Redraw the image to fit the new size
+        # Initialize the menu bar
+        self.menu_bar = QMenuBar(self)
+        self.setMenuBar(self.menu_bar)
+
+        # Add "Inspect" and "Modifications" menus
+        self.add_inspect_menu()
+        self.add_modifications_menu()
+
+    def add_inspect_menu(self):
+        inspect_menu = self.menu_bar.addMenu("Inspect")
+
+        # Add "Show File Info" action
+        show_file_info_action = QAction("Show File Info", self)
+        show_file_info_action.triggered.connect(self.show_file_info)
+        inspect_menu.addAction(show_file_info_action)
+
+    def add_modifications_menu(self):
+        modifications_menu = self.menu_bar.addMenu("Modifications")
+
+        # List of modification actions
+        modifications = [
+            ("Resampling", self.open_resampling_dialog),
+            ("Intensity Normalization", self.open_intensity_normalization_dialog),
+            ("Registration", self.open_registration_dialog),
+            ("Denoising", self.open_denoising_dialog),
+            ("ROI Tracking", self.open_roi_tracking_dialog),
+        ]
+
+        for name, callback in modifications:
+            action = QAction(name, self)
+            action.triggered.connect(callback)
+            modifications_menu.addAction(action)
+
+    def show_file_info(self):
+        if not self.current_file:
+            QMessageBox.warning(self, "No File Loaded", "Please load a file to view its information.")
+            return
+
+        try:
+            nii_file = nib.load(self.current_file)
+            img_shape = nii_file.shape
+            header = nii_file.header
+            img_spacing = header.get_zooms()
+
+            # Prepare the information string
+            info_text = f"Shape: {img_shape}\nSpacing: {img_spacing}"
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to retrieve file information:\n{e}")
+            return
+
+        # Create and display the information dialog
+        info_dialog = QMessageBox(self)
+        info_dialog.setWindowTitle("File Information")
+        info_dialog.setText(info_text)
+        info_dialog.setIcon(QMessageBox.Information)
+        info_dialog.setStandardButtons(QMessageBox.Ok)
+        info_dialog.exec_()
+
+    def open_resampling_dialog(self):
+        dialog = ResamplingDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            factor = dialog.factor
+            self.apply_resampling(factor)
+
+    def open_intensity_normalization_dialog(self):
+        dialog = IntensityNormalizationDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            min_val = dialog.min_val
+            max_val = dialog.max_val
+            self.apply_intensity_normalization(min_val, max_val)
+
+    def open_registration_dialog(self):
+        # Implement RegistrationDialog similar to ResamplingDialog
+        QMessageBox.information(self, "Info", "Registration dialog not implemented yet.")
+
+    def open_denoising_dialog(self):
+        # Implement DenoisingDialog similar to ResamplingDialog
+        QMessageBox.information(self, "Info", "Denoising dialog not implemented yet.")
+
+    def open_roi_tracking_dialog(self):
+        # Implement ROTrackingDialog similar to ResamplingDialog
+        QMessageBox.information(self, "Info", "ROI Tracking dialog not implemented yet.")
+
+    def apply_resampling(self, factor):
+        if not self.current_file:
+            QMessageBox.warning(self, "No File Loaded", "Please load a file to apply modifications.")
+            return
+
+        try:
+            original_data = self.img_data.copy()
+            modified_data = self.resample_algorithm(original_data, factor)
+            self.img_data = modified_data
+            self.update_image()
+            QMessageBox.information(self, "Resampling", "Resampling applied successfully.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to apply resampling:\n{e}")
+
+    def apply_intensity_normalization(self, min_val, max_val):
+        if not self.current_file:
+            QMessageBox.warning(self, "No File Loaded", "Please load a file to apply modifications.")
+            return
+
+        try:
+            original_data = self.img_data.copy()
+            modified_data = self.normalize_intensity(original_data, min_val, max_val)
+            self.img_data = modified_data
+            self.update_image()
+            QMessageBox.information(self, "Intensity Normalization", "Intensity normalization applied successfully.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to apply intensity normalization:\n{e}")
+
+    def apply_registration(self, reference_file):
+        if not self.current_file:
+            QMessageBox.warning(self, "No File Loaded", "Please load a file to apply modifications.")
+            return
+
+        try:
+            reference_nii = nib.load(reference_file)
+            reference_data = reference_nii.get_fdata()
+            original_data = self.img_data.copy()
+            modified_data = self.register_file(original_data, reference_data)
+            self.img_data = modified_data
+            self.update_image()
+            QMessageBox.information(self, "Registration", "Registration applied successfully.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to apply registration:\n{e}")
+
+    def apply_denoising(self, denoising_params):
+        if not self.current_file:
+            QMessageBox.warning(self, "No File Loaded", "Please load a file to apply modifications.")
+            return
+
+        try:
+            original_data = self.img_data.copy()
+            modified_data = self.denoise_file(original_data)
+            self.img_data = modified_data
+            self.update_image()
+            QMessageBox.information(self, "Denoising", "Denoising applied successfully.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to apply denoising:\n{e}")
+
+    def apply_roi_tracking(self, roi_params):
+        if not self.current_file:
+            QMessageBox.warning(self, "No File Loaded", "Please load a file to apply modifications.")
+            return
+
+        try:
+            original_data = self.img_data.copy()
+            modified_data = self.track_roi(original_data)
+            self.img_data = modified_data
+            self.update_image()
+            QMessageBox.information(self, "ROI Tracking", "ROI tracking applied successfully.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to apply ROI tracking:\n{e}")
+
+    def resample_algorithm(self, img_data, factor):
+        """Placeholder for resampling algorithm."""
+        # Example implementation using SimpleITK
+        try:
+            img = sitk.GetImageFromArray(img_data)
+            original_spacing = img.GetSpacing()
+            new_spacing = tuple([s / factor for s in original_spacing])
+            resampler = sitk.ResampleImageFilter()
+            resampler.SetOutputSpacing(new_spacing)
+            resampler.SetSize([int(sz * f) for sz, f in zip(img.GetSize(), [factor]*len(img.GetSize()))])
+            resampler.SetInterpolator(sitk.sitkLinear)
+            resampled_img = resampler.Execute(img)
+            resampled_data = sitk.GetArrayFromImage(resampled_img)
+            return resampled_data
+        except Exception as e:
+            print(f"Resampling failed: {e}")
+            return img_data  # Return original data on failure
+
+    def normalize_intensity(self, img_data, min_val, max_val):
+        """Placeholder for intensity normalization."""
+        try:
+            img_min = np.min(img_data)
+            img_max = np.max(img_data)
+            normalized = (img_data - img_min) / (img_max - img_min)  # Scale to [0,1]
+            normalized = normalized * (max_val - min_val) + min_val  # Scale to [min_val, max_val]
+            return normalized
+        except Exception as e:
+            print(f"Intensity normalization failed: {e}")
+            return img_data  # Return original data on failure
+
+    def register_file(self, img_data, reference_data):
+        """Placeholder for image registration."""
+        # Implement registration logic using SimpleITK or other libraries
+        print("Registration placeholder called.")
+        return img_data  # Placeholder
+
+    def denoise_file(self, img_data):
+        """Placeholder for denoising algorithm."""
+        # Implement denoising logic using SimpleITK, SciPy, or other libraries
+        print("Denoising placeholder called.")
+        return img_data  # Placeholder
+
+    def track_roi(self, img_data):
+        """Placeholder for ROI tracking."""
+        # Implement ROI tracking logic
+        print("ROI Tracking placeholder called.")
+        return img_data  # Placeholder
 
     def add_controls(self):
         # Play/Stop buttons for CINE mode

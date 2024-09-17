@@ -78,10 +78,3 @@ def extract_slice(nii_file):
         return data[:, :, shape[2] // 2, 0]
     else:
         raise ValueError(f"Invalid shape {shape} for image data")
-
-def adjust_speed(value, playing, timer):
-    """Adjust the playback speed for CINE mode."""
-    playback_speed = value
-    if playing:
-        timer.start(playback_speed)
-    return playback_speed
