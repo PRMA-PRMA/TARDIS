@@ -1,18 +1,47 @@
+# Tardis.py
 import sys
 import nibabel as nib
+from nibabel.processing import resample_from_to
 import numpy as np
-import SimpleITK as sitk  # Ensure SimpleITK is installed for this
+import SimpleITK as sitk
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from PyQt5.QtWidgets import (QMainWindow, QApplication, QVBoxLayout, QPushButton, QSlider, QWidget, QLabel,
-                             QHBoxLayout, QCheckBox, QScrollArea, QGridLayout, QFileDialog, QSizePolicy,
-                             QDesktopWidget, QMenuBar, QAction, QMessageBox, QDialog, QLineEdit)
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtWidgets import (
+    QMainWindow, QApplication, QVBoxLayout, QPushButton, QSlider, QWidget, QLabel,
+    QHBoxLayout, QCheckBox, QScrollArea, QGridLayout, QFileDialog, QSizePolicy,
+    QDesktopWidget, QMenuBar, QAction, QMessageBox, QDialog, QLineEdit, QSplitter
+)
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon, QPixmap
 import os
 from app_utils import handle_file_upload, extract_slice, clean_nifti_dir
+from preview_manager import PreviewManager
+from history_stack import HistoryStack
 
+# Import modification functions
+from registration_modifications import affine_registration, non_rigid_registration
+from filtering_modifications import apply_gaussian_filter, apply_median_filter, apply_non_local_means
 
+# Import threading for background processing
+class ModificationThread(QThread):
+    modification_complete = pyqtSignal(object, object)  # Emits modified_data and new_affine
+
+    def __init__(self, func, *args, **kwargs):
+        super().__init__()
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
+
+    def run(self):
+        try:
+            result = self.func(*self.args, **self.kwargs)
+            self.modification_complete.emit(*result)
+        except Exception as e:
+            self.modification_complete.emit(None, None)
+            print(f"Modification failed: {e}")
+
+# Dialog Classes (ResamplingDialog, IntensityNormalizationDialog, RegistrationDialog, FilteringDialog)
+# ... [As provided earlier, no changes needed here] ...
 class ResamplingDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -21,26 +50,39 @@ class ResamplingDialog(QDialog):
         self.setup_ui()
 
     def setup_ui(self):
-        layout = QVBoxLayout()
+        self.layout = QVBoxLayout()
+        self.setLayout(self.layout)
 
-        # Resampling Factor Input
-        factor_layout = QHBoxLayout()
-        factor_label = QLabel("Resampling Factor:")
-        self.factor_input = QLineEdit()
-        self.factor_input.setPlaceholderText("e.g., 2")
-        factor_layout.addWidget(factor_label)
-        factor_layout.addWidget(self.factor_input)
-        layout.addLayout(factor_layout)
+        # Image display area
+        self.image_layout = QHBoxLayout()
 
-        # Buttons
-        buttons_layout = QHBoxLayout()
-        apply_button = QPushButton("Apply")
-        cancel_button = QPushButton("Cancel")
-        apply_button.clicked.connect(self.apply)
-        cancel_button.clicked.connect(self.reject)
-        buttons_layout.addWidget(apply_button)
-        buttons_layout.addWidget(cancel_button)
-        layout.addLayout(buttons_layout)
+        # Set minimum sizes for better scaling
+        self.original_label = QLabel("Original")
+        self.original_label.setAlignment(Qt.AlignCenter)
+        self.original_label.setMinimumSize(200, 200)
+        self.original_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        self.modified_label = QLabel("Modified")
+        self.modified_label.setAlignment(Qt.AlignCenter)
+        self.modified_label.setMinimumSize(200, 200)
+        self.modified_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        self.image_layout.addWidget(self.original_label)
+        self.image_layout.addWidget(self.modified_label)
+        self.layout.addLayout(self.image_layout)
+
+        # Control buttons
+        self.button_layout = QHBoxLayout()
+        self.save_button = QPushButton("Save As")
+        self.reject_button = QPushButton("Reject")
+        self.close_button = QPushButton("Close")
+        self.save_button.clicked.connect(self.save_as)
+        self.reject_button.clicked.connect(self.reject_modification)
+        self.close_button.clicked.connect(self.close_preview)
+        self.button_layout.addWidget(self.save_button)
+        self.button_layout.addWidget(self.reject_button)
+        self.button_layout.addWidget(self.close_button)
+        self.layout.addLayout(self.button_layout)
 
         self.setLayout(layout)
 
@@ -107,6 +149,208 @@ class IntensityNormalizationDialog(QDialog):
         except ValueError as e:
             QMessageBox.warning(self, "Invalid Input", f"Please enter valid intensity values.\nError: {e}")
 
+class RegistrationDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Image Registration")
+        self.setModal(True)
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout()
+
+        # Registration Type Selection
+        type_layout = QHBoxLayout()
+        type_label = QLabel("Registration Type:")
+        self.affine_radio = QCheckBox("Affine")
+        self.non_rigid_radio = QCheckBox("Non-Rigid")
+        self.affine_radio.setChecked(True)
+        type_layout.addWidget(type_label)
+        type_layout.addWidget(self.affine_radio)
+        type_layout.addWidget(self.non_rigid_radio)
+        layout.addLayout(type_layout)
+
+        # Reference Image Selection
+        ref_layout = QHBoxLayout()
+        ref_label = QLabel("Reference Image:")
+        self.ref_input = QLineEdit()
+        self.ref_browse = QPushButton("Browse")
+        self.ref_browse.clicked.connect(self.browse_reference)
+        ref_layout.addWidget(ref_label)
+        ref_layout.addWidget(self.ref_input)
+        ref_layout.addWidget(self.ref_browse)
+        layout.addLayout(ref_layout)
+
+        # Buttons
+        buttons_layout = QHBoxLayout()
+        apply_button = QPushButton("Apply")
+        cancel_button = QPushButton("Cancel")
+        apply_button.clicked.connect(self.apply)
+        cancel_button.clicked.connect(self.reject)
+        buttons_layout.addWidget(apply_button)
+        buttons_layout.addWidget(cancel_button)
+        layout.addLayout(buttons_layout)
+
+        self.setLayout(layout)
+
+    def browse_reference(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Reference Image", "",
+                                                   "NIfTI Files (*.nii *.nii.gz)")
+        if file_path:
+            self.ref_input.setText(file_path)
+
+    def apply(self):
+        registration_type = None
+        if self.affine_radio.isChecked() and not self.non_rigid_radio.isChecked():
+            registration_type = "Affine"
+        elif self.non_rigid_radio.isChecked() and not self.affine_radio.isChecked():
+            registration_type = "Non-Rigid"
+        elif self.affine_radio.isChecked() and self.non_rigid_radio.isChecked():
+            QMessageBox.warning(self, "Selection Error", "Please select only one registration type.")
+            return
+        else:
+            QMessageBox.warning(self, "Selection Error", "Please select a registration type.")
+            return
+
+        reference_file = self.ref_input.text()
+        if not reference_file or not os.path.isfile(reference_file):
+            QMessageBox.warning(self, "Reference Image", "Please select a valid reference image.")
+            return
+
+        self.registration_type = registration_type
+        self.reference_file = reference_file
+        self.accept()
+
+from PyQt5.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QRadioButton,
+    QButtonGroup, QLineEdit, QPushButton, QWidget, QMessageBox
+)
+
+class FilteringDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Filtering Options")
+        self.setModal(True)
+        self.selected_filters = None  # Initialize selected_filters
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout()
+
+        # Filter Type Selection using QRadioButton
+        filter_layout = QHBoxLayout()
+        filter_label = QLabel("Filter Type:")
+
+        self.gaussian_radio = QRadioButton("Gaussian")
+        self.median_radio = QRadioButton("Median")
+        self.nlm_radio = QRadioButton("Non-Local Means")
+        self.gaussian_radio.setChecked(True)
+
+        # Group the radio buttons
+        self.filter_group = QButtonGroup()
+        self.filter_group.addButton(self.gaussian_radio)
+        self.filter_group.addButton(self.median_radio)
+        self.filter_group.addButton(self.nlm_radio)
+        self.filter_group.buttonClicked.connect(self.update_parameters)
+
+        filter_layout.addWidget(filter_label)
+        filter_layout.addWidget(self.gaussian_radio)
+        filter_layout.addWidget(self.median_radio)
+        filter_layout.addWidget(self.nlm_radio)
+        layout.addLayout(filter_layout)
+
+        # Parameter Inputs
+        self.param_layout = QVBoxLayout()
+
+        # Gaussian Parameters
+        self.gaussian_param_layout = QHBoxLayout()
+        self.gaussian_label = QLabel("Sigma:")
+        self.gaussian_input = QLineEdit()
+        self.gaussian_input.setPlaceholderText("e.g., 1.0")
+        self.gaussian_param_layout.addWidget(self.gaussian_label)
+        self.gaussian_param_layout.addWidget(self.gaussian_input)
+        self.gaussian_param_widget = QWidget()
+        self.gaussian_param_widget.setLayout(self.gaussian_param_layout)
+        self.param_layout.addWidget(self.gaussian_param_widget)
+
+        # Median Parameters
+        self.median_param_layout = QHBoxLayout()
+        self.median_label = QLabel("Kernel Size:")
+        self.median_input = QLineEdit()
+        self.median_input.setPlaceholderText("e.g., 3")
+        self.median_param_layout.addWidget(self.median_label)
+        self.median_param_layout.addWidget(self.median_input)
+        self.median_param_widget = QWidget()
+        self.median_param_widget.setLayout(self.median_param_layout)
+        self.param_layout.addWidget(self.median_param_widget)
+        self.median_param_widget.setVisible(False)
+
+        # Non-Local Means Parameters
+        self.nlm_param_layout = QHBoxLayout()
+        self.nlm_patch_label = QLabel("Patch Size:")
+        self.nlm_patch_input = QLineEdit()
+        self.nlm_patch_input.setPlaceholderText("e.g., 5")
+        self.nlm_distance_label = QLabel("Patch Distance:")
+        self.nlm_distance_input = QLineEdit()
+        self.nlm_distance_input.setPlaceholderText("e.g., 6")
+        self.nlm_h_label = QLabel("H Parameter:")
+        self.nlm_h_input = QLineEdit()
+        self.nlm_h_input.setPlaceholderText("e.g., 0.1")
+        self.nlm_param_layout.addWidget(self.nlm_patch_label)
+        self.nlm_param_layout.addWidget(self.nlm_patch_input)
+        self.nlm_param_layout.addWidget(self.nlm_distance_label)
+        self.nlm_param_layout.addWidget(self.nlm_distance_input)
+        self.nlm_param_layout.addWidget(self.nlm_h_label)
+        self.nlm_param_layout.addWidget(self.nlm_h_input)
+        self.nlm_param_widget = QWidget()
+        self.nlm_param_widget.setLayout(self.nlm_param_layout)
+        self.param_layout.addWidget(self.nlm_param_widget)
+        self.nlm_param_widget.setVisible(False)
+
+        layout.addLayout(self.param_layout)
+
+        # Buttons
+        buttons_layout = QHBoxLayout()
+        apply_button = QPushButton("Apply")
+        cancel_button = QPushButton("Cancel")
+        apply_button.clicked.connect(self.apply)
+        cancel_button.clicked.connect(self.reject)
+        buttons_layout.addWidget(apply_button)
+        buttons_layout.addWidget(cancel_button)
+        layout.addLayout(buttons_layout)
+
+        self.setLayout(layout)
+
+    def update_parameters(self):
+        self.gaussian_param_widget.setVisible(self.gaussian_radio.isChecked())
+        self.median_param_widget.setVisible(self.median_radio.isChecked())
+        self.nlm_param_widget.setVisible(self.nlm_radio.isChecked())
+
+    def apply(self):
+        try:
+            # Determine which filter is selected and store the parameters
+            if self.gaussian_radio.isChecked():
+                sigma = float(self.gaussian_input.text())
+                self.selected_filters = {'type': 'gaussian', 'sigma': sigma}
+            elif self.median_radio.isChecked():
+                kernel_size = int(self.median_input.text())
+                self.selected_filters = {'type': 'median', 'kernel_size': kernel_size}
+            elif self.nlm_radio.isChecked():
+                patch_size = int(self.nlm_patch_input.text())
+                patch_distance = int(self.nlm_distance_input.text())
+                h_param = float(self.nlm_h_input.text())
+                self.selected_filters = {
+                    'type': 'nlm',
+                    'patch_size': patch_size,
+                    'patch_distance': patch_distance,
+                    'h_param': h_param
+                }
+            self.accept()
+        except ValueError as ve:
+            QMessageBox.critical(self, "Input Error", f"Invalid input: {ve}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"An unexpected error occurred: {e}")
+
 
 # Similarly, create RegistrationDialog, DenoisingDialog, and ROTrackingDialog
 
@@ -115,13 +359,12 @@ class NiftiViewer(QMainWindow):
     def __init__(self, initial_file=None):
         super().__init__()
 
-        # Dictionary to store all uploaded files (filename -> NIfTI object)
-        self.current_file = None  # Initialize current file
-        self.uploaded_files = {}
+        # Dictionary to store all uploaded files (filename -> file_path)
+        self.uploaded_files = {}  # filename -> file_path
 
-        # If there's an initial file, load it
-        if initial_file:
-            self.load_nifti_file(initial_file)
+        self.current_file = None  # Initialize current file
+        self.img_data = None
+        self.img_affine = None  # Initialize affine matrix
 
         self.slice_idx = 0
         self.time_idx = 0
@@ -129,7 +372,14 @@ class NiftiViewer(QMainWindow):
         self.dark_mode_enabled = True
         self.playback_speed = 100  # Default playback speed, will be updated for CINE
 
+        # Initialize UI
         self.init_ui()
+
+        # Initialize history stack
+        self.history = HistoryStack()
+
+        # Add Undo/Redo actions
+        self.add_edit_menu()
 
         # Timer for frame updates
         self.timer = QTimer(self)
@@ -142,54 +392,71 @@ class NiftiViewer(QMainWindow):
 
         self.resize(int(self.screen_width * 0.8), int(self.screen_height * 0.8))  # Resize window to 80% of screen size
 
-    def closeEvent(self, a0):
+        # If there's an initial file, load it
+        if initial_file:
+            self.load_nifti_file(initial_file)
+
+    def closeEvent(self, event):
         try:
             clean_nifti_dir()
         except:
             pass
-        a0.accept()
+        event.accept()
 
     def init_ui(self):
         # Main widget
         widget = QWidget()
         self.setCentralWidget(widget)
 
-        # Main layout
+        # Main horizontal layout using QSplitter
+        self.splitter = QSplitter(Qt.Horizontal)
         self.main_layout = QHBoxLayout()
+        self.main_layout.addWidget(self.splitter)
         widget.setLayout(self.main_layout)
 
         # Left sidebar for thumbnails (scrollable)
         self.scroll_area = QScrollArea()
         self.scroll_widget = QWidget()
-        self.scroll_layout = QGridLayout()
+        self.scroll_layout = QVBoxLayout()
         self.scroll_widget.setLayout(self.scroll_layout)
         self.scroll_area.setWidget(self.scroll_widget)
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFixedWidth(250)  # Set a fixed width for the thumbnail area
-        self.main_layout.addWidget(self.scroll_area)
-        self.thumbnail_widgets = {}  # Dictionary to store the thumbnails with their corresponding filenames
+        self.scroll_area.setFixedWidth(250)  # Fixed width for thumbnails
+        self.splitter.addWidget(self.scroll_area)
+        self.thumbnail_widgets = {}  # Dictionary to store thumbnails
 
-        # Right side for image display and controls
-        self.right_layout = QVBoxLayout()
-        self.main_layout.addLayout(self.right_layout)
+        # Central area: Image display and controls
+        central_widget = QWidget()
+        self.right_layout = QVBoxLayout()  # Define right_layout for central content
+        central_widget.setLayout(self.right_layout)
 
-        # Canvas for displaying the image (dynamically resizeable)
+        # Canvas for displaying the image
         self.figure, self.ax = plt.subplots(figsize=(8, 8))
         self.ax.set_anchor('C')  # Center the image initially
         self.canvas = FigureCanvas(self.figure)
-
-        # Set the canvas to expand dynamically
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.canvas.updateGeometry()
         self.right_layout.addWidget(self.canvas)
 
-        # Add buttons and sliders
+        # Buttons and sliders for controls
         self.add_controls()
 
         # Button to upload additional files
         self.upload_button = QPushButton("Upload New File")
         self.upload_button.clicked.connect(self.upload_file)
         self.right_layout.addWidget(self.upload_button)
+
+        # Add central widget to splitter
+        self.splitter.addWidget(central_widget)
+
+        # Right sidebar for PreviewManager
+        self.preview_manager = PreviewManager(self)
+        self.preview_manager.setFixedWidth(400)  # Fixed width for preview
+        self.preview_manager.hide()  # Initially hidden
+        self.splitter.addWidget(self.preview_manager)
+
+        # Set initial sizes for the splitter sections (ratios)
+        self.splitter.setSizes([250, 800, 0])  # Start without preview
 
         # Apply default dark mode
         self.apply_dark_mode()
@@ -227,6 +494,44 @@ class NiftiViewer(QMainWindow):
             action.triggered.connect(callback)
             modifications_menu.addAction(action)
 
+    def add_edit_menu(self):
+        edit_menu = self.menu_bar.addMenu("Edit")
+
+        self.undo_action = QAction("Undo", self)
+        self.undo_action.setShortcut("Ctrl+Z")
+        self.undo_action.triggered.connect(self.undo)
+        self.undo_action.setEnabled(False)  # Initially disabled
+        edit_menu.addAction(self.undo_action)
+
+        self.redo_action = QAction("Redo", self)
+        self.redo_action.setShortcut("Ctrl+Y")
+        self.redo_action.triggered.connect(self.redo)
+        self.redo_action.setEnabled(False)  # Initially disabled
+        edit_menu.addAction(self.redo_action)
+
+    def undo(self):
+        state = self.history.undo()
+        if state is not None:
+            self.img_data = state
+            self.update_image()
+            self.update_undo_redo_actions()
+        else:
+            QMessageBox.information(self, "Undo", "Nothing to undo.")
+
+    def redo(self):
+        state = self.history.redo()
+        if state is not None:
+            self.img_data = state
+            self.update_image()
+            self.update_undo_redo_actions()
+        else:
+            QMessageBox.information(self, "Redo", "Nothing to redo.")
+
+    def update_undo_redo_actions(self):
+        """Enable or disable Undo/Redo actions based on history stack."""
+        self.undo_action.setEnabled(self.history.can_undo())
+        self.redo_action.setEnabled(self.history.can_redo())
+
     def show_file_info(self):
         if not self.current_file:
             QMessageBox.warning(self, "No File Loaded", "Please load a file to view its information.")
@@ -253,6 +558,35 @@ class NiftiViewer(QMainWindow):
         info_dialog.setStandardButtons(QMessageBox.Ok)
         info_dialog.exec_()
 
+    def toggle_preview_panel(self, show):
+        """Adjust the splitter to show or hide the preview panel."""
+        if show:
+            self.preview_manager.show()
+            self.splitter.setSizes([250, 600, 400])
+        else:
+            self.preview_manager.hide()
+            self.splitter.setSizes([250, 1000, 0])  # Adjust sizes as needed
+
+    def apply_modification(self, modified_data, new_affine=None):
+        """Show preview before applying the modification."""
+        if new_affine is not None:
+            self.img_affine = new_affine  # Update affine matrix if provided
+        self.preview_manager.show_preview(self.img_data, modified_data)
+
+    def accept_modification(self, modified_data):
+        """Accept the modification and update history."""
+        # Push current state to history before applying
+        self.history.push(self.img_data.copy())
+        self.img_data = modified_data
+        self.update_image()
+        self.update_undo_redo_actions()
+
+    def reject_modification(self):
+        """Reject the pending modification and hide the preview."""
+        self.preview_manager.hide()
+        self.toggle_preview_panel(False)
+        QMessageBox.information(self, "Modification Rejected", "The modification has been discarded.")
+
     def open_resampling_dialog(self):
         dialog = ResamplingDialog(self)
         if dialog.exec_() == QDialog.Accepted:
@@ -267,12 +601,20 @@ class NiftiViewer(QMainWindow):
             self.apply_intensity_normalization(min_val, max_val)
 
     def open_registration_dialog(self):
-        # Implement RegistrationDialog similar to ResamplingDialog
-        QMessageBox.information(self, "Info", "Registration dialog not implemented yet.")
+        dialog = RegistrationDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            registration_type = dialog.registration_type
+            reference_file = dialog.reference_file
+            self.perform_registration(registration_type, reference_file)
 
     def open_denoising_dialog(self):
-        # Implement DenoisingDialog similar to ResamplingDialog
-        QMessageBox.information(self, "Info", "Denoising dialog not implemented yet.")
+        dialog = FilteringDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            selected_filters = dialog.selected_filters
+            if selected_filters is None:
+                QMessageBox.warning(self, "Warning", "No filters selected.")
+            else:
+                self.apply_filtering(selected_filters)
 
     def open_roi_tracking_dialog(self):
         # Implement ROTrackingDialog similar to ResamplingDialog
@@ -285,10 +627,10 @@ class NiftiViewer(QMainWindow):
 
         try:
             original_data = self.img_data.copy()
-            modified_data = self.resample_algorithm(original_data, factor)
-            self.img_data = modified_data
-            self.update_image()
-            QMessageBox.information(self, "Resampling", "Resampling applied successfully.")
+            # Start a thread to perform resampling
+            thread = ModificationThread(self.resample_algorithm, original_data, factor)
+            thread.modification_complete.connect(self.on_modification_complete)
+            thread.start()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to apply resampling:\n{e}")
 
@@ -300,13 +642,16 @@ class NiftiViewer(QMainWindow):
         try:
             original_data = self.img_data.copy()
             modified_data = self.normalize_intensity(original_data, min_val, max_val)
+            # Push to history and apply
+            self.history.push(self.img_data.copy())
             self.img_data = modified_data
             self.update_image()
+            self.update_undo_redo_actions()
             QMessageBox.information(self, "Intensity Normalization", "Intensity normalization applied successfully.")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to apply intensity normalization:\n{e}")
 
-    def apply_registration(self, reference_file):
+    def perform_registration(self, registration_type, reference_file):
         if not self.current_file:
             QMessageBox.warning(self, "No File Loaded", "Please load a file to apply modifications.")
             return
@@ -314,77 +659,157 @@ class NiftiViewer(QMainWindow):
         try:
             reference_nii = nib.load(reference_file)
             reference_data = reference_nii.get_fdata()
+            reference_affine = reference_nii.affine
+
             original_data = self.img_data.copy()
-            modified_data = self.register_file(original_data, reference_data)
-            self.img_data = modified_data
-            self.update_image()
-            QMessageBox.information(self, "Registration", "Registration applied successfully.")
+            original_affine = self.img_affine.copy()
+
+            if registration_type == "Affine":
+                func = affine_registration
+            elif registration_type == "Non-Rigid":
+                func = non_rigid_registration
+            else:
+                QMessageBox.warning(self, "Registration Type", "Unknown registration type selected.")
+                return
+
+            # Start a thread to perform registration
+            thread = ModificationThread(func, original_data, original_affine, reference_data, reference_affine)
+            thread.modification_complete.connect(self.on_registration_complete)  # Ensure connection
+            thread.start()
+
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to apply registration:\n{e}")
 
-    def apply_denoising(self, denoising_params):
+        try:
+            reference_nii = nib.load(reference_file)
+            reference_data = reference_nii.get_fdata()
+            reference_affine = reference_nii.affine
+
+            original_data = self.img_data.copy()
+            original_affine = self.img_affine.copy()
+
+            if registration_type == "Affine":
+                func = affine_registration
+            elif registration_type == "Non-Rigid":
+                func = non_rigid_registration
+            else:
+                QMessageBox.warning(self, "Registration Type", "Unknown registration type selected.")
+                return
+
+            # Start a thread to perform registration
+            thread = ModificationThread(func, original_data, original_affine, reference_data, reference_affine)
+            thread.modification_complete.connect(self.on_registration_complete)
+            thread.start()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to apply registration:\n{e}")
+
+    def on_registration_complete(self, modified_data, new_affine):
+        if modified_data is not None:
+            self.apply_modification(modified_data, new_affine)
+            QMessageBox.information(self, "Registration", "Registration completed successfully.")
+        else:
+            QMessageBox.critical(self, "Registration Failed", "Registration encountered an error.")
+
+    def apply_filtering(self, selected_filters):
         if not self.current_file:
             QMessageBox.warning(self, "No File Loaded", "Please load a file to apply modifications.")
             return
 
         try:
             original_data = self.img_data.copy()
-            modified_data = self.denoise_file(original_data)
+            modified_data = original_data.copy()
+
+            filter_name = selected_filters.get('type')
+
+            # Apply each selected filter sequentially
+            if filter_name == 'gaussian':
+                sigma = selected_filters.get('sigma')
+                modified_data = apply_gaussian_filter(modified_data, sigma)
+            elif filter_name == 'median':
+                kernel_size = selected_filters.get('kernel_size')
+                modified_data = apply_median_filter(modified_data, kernel_size)
+            elif filter_name == 'nlm':
+                patch_size = selected_filters.get('patch_size')
+                patch_distance = selected_filters.get('patch_distance')
+                h_param = selected_filters.get('h_param')
+                modified_data = apply_non_local_means(modified_data, patch_size, patch_distance, h_param)
+            else:
+                QMessageBox.warning(self, "Filter Error", f"Unknown filter: {filter_name}")
+                return
+
+            # Push to history and apply
+            self.history.push(self.img_data.copy())
             self.img_data = modified_data
             self.update_image()
-            QMessageBox.information(self, "Denoising", "Denoising applied successfully.")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to apply denoising:\n{e}")
+            self.update_undo_redo_actions()
+            QMessageBox.information(self, "Filtering", "Filtering applied successfully.")
 
-    def apply_roi_tracking(self, roi_params):
-        if not self.current_file:
-            QMessageBox.warning(self, "No File Loaded", "Please load a file to apply modifications.")
-            return
-
-        try:
-            original_data = self.img_data.copy()
-            modified_data = self.track_roi(original_data)
-            self.img_data = modified_data
-            self.update_image()
-            QMessageBox.information(self, "ROI Tracking", "ROI tracking applied successfully.")
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to apply ROI tracking:\n{e}")
+            QMessageBox.critical(self, "Error", f"Failed to apply filtering:\n{e}")
+
+    def on_modification_complete(self, modified_data, new_affine):
+        if modified_data is not None:
+            self.apply_modification(modified_data, new_affine)
+            QMessageBox.information(self, "Resampling", "Resampling completed successfully.")
+        else:
+            QMessageBox.critical(self, "Resampling Failed", "Resampling encountered an error.")
+
+    def apply_modification_from_thread(self, modified_data, new_affine=None):
+        """Handle modifications completed by threads."""
+        if modified_data is not None:
+            self.apply_modification(modified_data, new_affine)
+        else:
+            QMessageBox.critical(self, "Modification Failed", "The modification could not be completed.")
+
+    def apply_registration_from_thread(self, modified_data, new_affine=None):
+        """Handle registration completed by threads."""
+        if modified_data is not None:
+            self.apply_modification(modified_data, new_affine)
+            QMessageBox.information(self, "Registration", "Registration completed successfully.")
+        else:
+            QMessageBox.critical(self, "Registration Failed", "Registration encountered an error.")
 
     def resample_algorithm(self, img_data, factor):
-        """Placeholder for resampling algorithm."""
-        # Example implementation using SimpleITK
+        """Resampling algorithm using Nibabel."""
+        """
         try:
-            img = sitk.GetImageFromArray(img_data)
-            original_spacing = img.GetSpacing()
-            new_spacing = tuple([s / factor for s in original_spacing])
-            resampler = sitk.ResampleImageFilter()
-            resampler.SetOutputSpacing(new_spacing)
-            resampler.SetSize([int(sz * f) for sz, f in zip(img.GetSize(), [factor]*len(img.GetSize()))])
-            resampler.SetInterpolator(sitk.sitkLinear)
-            resampled_img = resampler.Execute(img)
-            resampled_data = sitk.GetArrayFromImage(resampled_img)
-            return resampled_data
+            # Create a Nibabel Nifti1Image
+            nifti_img = nib.Nifti1Image(img_data, self.img_affine)
+
+            # Define the resampling factor
+            new_affine = nifti_img.affine.copy()
+            new_affine[:3, :3] = new_affine[:3, :3] / factor  # Adjust spacing
+
+            # Compute new shape
+            new_shape = np.ceil(np.array(nifti_img.shape) * factor).astype(int)
+
+            # Perform resampling using Nibabel's processing
+            resampled_img = nib.processing.resample_from_to(nifti_img, target_affine=new_affine, target_shape=new_shape,
+                                                    order=1)  # order=1 for linear
+            resampled_data = resampled_img.get_fdata()
+            resampled_affine = resampled_img.affine
+
+            return resampled_data, resampled_affine
         except Exception as e:
             print(f"Resampling failed: {e}")
-            return img_data  # Return original data on failure
+            return None, None  # Indicate failure
+        """
+        print("work in progrss")
 
     def normalize_intensity(self, img_data, min_val, max_val):
-        """Placeholder for intensity normalization."""
+        """Intensity normalization."""
         try:
             img_min = np.min(img_data)
             img_max = np.max(img_data)
+            if img_max - img_min == 0:
+                raise ValueError("Image has zero intensity range.")
             normalized = (img_data - img_min) / (img_max - img_min)  # Scale to [0,1]
             normalized = normalized * (max_val - min_val) + min_val  # Scale to [min_val, max_val]
             return normalized
         except Exception as e:
             print(f"Intensity normalization failed: {e}")
-            return img_data  # Return original data on failure
-
-    def register_file(self, img_data, reference_data):
-        """Placeholder for image registration."""
-        # Implement registration logic using SimpleITK or other libraries
-        print("Registration placeholder called.")
-        return img_data  # Placeholder
+            return None  # Indicate failure
 
     def denoise_file(self, img_data):
         """Placeholder for denoising algorithm."""
@@ -412,11 +837,11 @@ class NiftiViewer(QMainWindow):
         self.right_layout.addLayout(button_layout)
 
         # Label and slider for playback speed (CINE only)
-        self.playback_speed_label = QLabel(f"Playback Speed: {self.playback_speed} ms")
+        self.playback_speed_label = QLabel(f"Playback Speed: {100} ms")
         self.speed_slider = QSlider(Qt.Horizontal)
         self.speed_slider.setMinimum(10)  # Fastest
         self.speed_slider.setMaximum(500)  # Slowest
-        self.speed_slider.setValue(self.playback_speed)
+        self.speed_slider.setValue(100)
         self.speed_slider.setTickInterval(50)
         self.speed_slider.valueChanged.connect(self.adjust_speed)
         self.right_layout.addWidget(self.playback_speed_label)
@@ -425,6 +850,8 @@ class NiftiViewer(QMainWindow):
         # Label and slider for slice depth (3D mode)
         self.slice_depth_label = QLabel("Slice Depth")
         self.slice_slider = QSlider(Qt.Horizontal)
+        self.slice_slider.setMinimum(0)
+        self.slice_slider.valueChanged.connect(self.update_slice)
         self.right_layout.addWidget(self.slice_depth_label)
         self.right_layout.addWidget(self.slice_slider)
 
@@ -453,32 +880,27 @@ class NiftiViewer(QMainWindow):
             nii_file = nib.load(file_path)
             self.add_thumbnail(file_path)  # Now, let add_thumbnail handle the addition to uploaded_files
 
-            if len(self.uploaded_files) == 1:
-                # Load the first file by default
-                self.current_file = file_path
-                self.img_data = nii_file.get_fdata()
-                self.slice_idx = self.img_data.shape[2] // 2  # Default middle slice
-                self.update_image()
+            # Load the first file by default if no file is currently active
+            if not self.current_file:
+                self.set_active_file(file_path)
 
             # Use SimpleITK to read temporal resolution from the NIfTI header
             itk_img = sitk.ReadImage(file_path)
             img_spacing = itk_img.GetSpacing()
 
             # If it's a CINE scan (4D image), set the playback speed to the temporal resolution
-            if len(self.img_data.shape) == 4:
+            if len(self.img_data.shape) == 4 and self.img_data.shape[3] > 1:
                 temporal_resolution = img_spacing[3] * 1000  # Convert seconds to milliseconds
-                self.playback_speed = int(temporal_resolution)  # Set playback speed
+                self.playback_speed = max(10, int(temporal_resolution))  # Ensure minimum speed
                 self.playback_speed_label.setText(f"Playback Speed: {self.playback_speed} ms")
                 self.speed_slider.setValue(self.playback_speed)
 
             # Update window title with file name
-            self.setWindowTitle(f'NIfTI Viewer - {os.path.basename(file_path)}')
-
-            # Switch between 3D and CINE modes based on file type
-            self.switch_mode(nii_file)
+            self.setWindowTitle(f'TARDIS - {os.path.basename(file_path)}')
 
         except Exception as e:
             print(f"Error loading file: {file_path}\n{e}")
+            QMessageBox.critical(self, "Error", f"Failed to load file:\n{e}")
 
     def add_thumbnail(self, file_path):
         """Create a thumbnail for the file and add it to the sidebar with a delete button."""
@@ -487,13 +909,11 @@ class NiftiViewer(QMainWindow):
 
             # Only add the file if it hasn't already been added
             if filename in self.uploaded_files:
-                print("uploaded Files:", self.uploaded_files)
-                #print(f"File {filename} was previously added. Ensuring full cleanup before re-adding.")
                 self.delete_file(file_path)  # Clean up if the file was previously added
 
             # Now, add the file to the dictionary of uploaded files after the check
+            self.uploaded_files[filename] = file_path
             nii_file = nib.load(file_path)
-            self.uploaded_files[filename] = nii_file
             middle_slice = extract_slice(nii_file)
 
             # Create thumbnail image
@@ -504,7 +924,7 @@ class NiftiViewer(QMainWindow):
             plt.tight_layout()
 
             # Convert the plot to a canvas and use it as a thumbnail
-            canvas = FigureCanvas(plt.gcf())
+            canvas = FigureCanvas(fig)
             canvas.draw()
 
             # Convert canvas to QPixmap and then to QIcon
@@ -535,8 +955,7 @@ class NiftiViewer(QMainWindow):
             thumbnail_container.setLayout(thumbnail_layout)
 
             # Add the thumbnail container directly to the scroll layout
-            row = len(self.uploaded_files) - 1
-            self.scroll_layout.addWidget(thumbnail_container, row, 0)
+            self.scroll_layout.addWidget(thumbnail_container)
 
         except Exception as e:
             print(f"Error creating thumbnail for file: {file_path}\n{e}")
@@ -544,16 +963,12 @@ class NiftiViewer(QMainWindow):
     def delete_file(self, file_path):
         """Delete the selected file and remove it from the view without deleting from disk."""
         try:
-            #print(f"Attempting to delete file: {file_path}")
-            # Get the filename and remove the file from the dictionary of uploaded files
             filename = os.path.basename(file_path)
 
             if filename in self.uploaded_files:
                 del self.uploaded_files[filename]
-                #print(f"Removed {filename} from uploaded_files")
             else:
                 pass
-                #print(f"File {filename} not found in uploaded_files")
 
             # Iterate over the layout to find and remove the thumbnail widget
             for i in reversed(range(self.scroll_layout.count())):
@@ -566,38 +981,25 @@ class NiftiViewer(QMainWindow):
 
                         # Check if this is the correct widget by comparing the file_path
                         if stored_file_path == file_path:
-                            #print(f"Match found! Removing widget for {file_path}")
                             removed_widget = self.scroll_layout.takeAt(i).widget()
                             if removed_widget:
                                 removed_widget.setParent(None)  # Remove widget from layout
-                                removed_widget.deleteLater()  # Schedule it for deletion
-                                #print(f"Widget removed for {file_path}")
+                                removed_widget.deleteLater()
 
             # Clear current_file if it matches the deleted file
             if self.current_file == file_path:
                 self.current_file = None
+                self.img_data = None
+                self.img_affine = None
                 self.ax.clear()
                 self.canvas.draw()
-                self.setWindowTitle('NIfTI Viewer - No File Selected')
-                print(f"Cleared display for {file_path}")
+                self.setWindowTitle('TARDIS - No File Selected')
 
             # Refresh the layout after deleting
-            self.refresh_thumbnail_layout()
+            # self.refresh_thumbnail_layout()  # Not needed since we've already removed the widget
 
         except Exception as e:
             print(f"Error deleting file: {e}")
-
-    def refresh_thumbnail_layout(self):
-        """Clear the layout and rebuild it with the remaining thumbnails."""
-        # Clear all the items from the layout
-        for i in reversed(range(self.scroll_layout.count())):
-            item = self.scroll_layout.takeAt(i)
-            if item.widget():
-                item.widget().deleteLater()
-
-        # Rebuild the layout by re-adding all the current thumbnails
-        for row, filename in enumerate(self.uploaded_files.keys()):
-            self.add_thumbnail(self.uploaded_files[filename].get_filename())  # Re-add the thumbnail
 
     def select_file_by_thumbnail(self, file_path):
         """Handle file selection by clicking on a thumbnail."""
@@ -610,17 +1012,19 @@ class NiftiViewer(QMainWindow):
         """Set the clicked file as the active file for viewing."""
         try:
             self.current_file = file_path
-            nii_file = self.uploaded_files[os.path.basename(file_path)]
+            nii_file = nib.load(file_path)
             self.img_data = nii_file.get_fdata()
-            self.slice_idx = self.img_data.shape[2] // 2
+            self.img_affine = nii_file.affine  # Store affine matrix
+            self.slice_idx = self.img_data.shape[2] // 2  # Default middle slice
             self.time_idx = 0  # Reset time index when switching files
             self.update_image()
 
             # Update window title with file name
-            self.setWindowTitle(f'NIfTI Viewer - {os.path.basename(file_path)}')
+            self.setWindowTitle(f'TARDIS - {os.path.basename(file_path)}')
 
-            # Switch between 3D and CINE modes
+            # Switch between 3D and CINE modes based on file type
             self.switch_mode(nii_file)
+
         except Exception as e:
             print(f"Error activating file: {file_path}\n{e}")
 
@@ -654,7 +1058,7 @@ class NiftiViewer(QMainWindow):
                 self.frame_slice_label.setText(f"Slice {self.slice_idx}")
 
             self.ax.imshow(slice_data, cmap='gray')
-            self.ax.set_title(f"Slice {self.slice_idx} (Time {self.time_idx})")
+            self.ax.set_title(self.frame_slice_label.text())
             self.canvas.draw()
         except Exception as e:
             print(f"Error updating image: {e}")
@@ -715,16 +1119,15 @@ class NiftiViewer(QMainWindow):
 
     def next_frame(self):
         """Go to the next frame in CINE mode."""
-        if len(self.img_data.shape) == 4:
+        if len(self.img_data.shape) == 4 and self.img_data.shape[3] > 1:
             self.time_idx = (self.time_idx + 1) % self.img_data.shape[3]
-            self.frame_slice_label.setText(f"Frame {self.time_idx}")  # Update frame indicator
-        self.update_image()
+            self.frame_slice_label.setText(f"Frame {self.time_idx}")
+            self.update_image()
 
     def adjust_speed(self, value):
         """Adjust the playback speed for CINE mode."""
         self.playback_speed = value
-        self.playback_speed_label.setText(
-            f"Playback Speed: {self.playback_speed} ms")  # Update label with current speed
+        self.playback_speed_label.setText(f"Playback Speed: {self.playback_speed} ms")
         if self.playing:
             self.timer.start(self.playback_speed)
 
@@ -761,6 +1164,11 @@ class NiftiViewer(QMainWindow):
                 # Load the NIfTI file after handling
                 self.load_nifti_file(nifti_file_path)
 
+    def show_preview(self, original, modified):
+        """Display the preview of modifications."""
+        self.preview_manager.show_preview(original, modified)
+
+    # ... Additional methods as necessary ...
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
@@ -769,7 +1177,7 @@ if __name__ == '__main__':
     initial_file = None
 
     viewer = NiftiViewer(initial_file)
-    viewer.setWindowTitle('NIfTI Viewer with Thumbnails')
+    viewer.setWindowTitle('TARDIS - No File Selected')
     viewer.show()
 
     sys.exit(app.exec_())
