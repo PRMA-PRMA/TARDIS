@@ -384,17 +384,11 @@ class ComparisonWidget(QWidget):
     def init_ui(self):
         layout = QVBoxLayout()
 
-        # Instruction Label
-        self.instruction_label = QLabel("Drop a thumbnail here to compare")
-        self.instruction_label.setAlignment(Qt.AlignCenter)
-        self.instruction_label.setStyleSheet("color: white; font-size: 14px;")
-        layout.addWidget(self.instruction_label)
-
         # Image Label
-        self.image_label = QLabel("Comparison Image")
+        self.image_label = QLabel("Drop a thumbnail here to compare")
         self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setStyleSheet("background-color: #2E2E2E; color: white;")
-        self.image_label.setScaledContents(True)
+        self.image_label.setStyleSheet("background-color: #000000; color: white;") # grey 2E2E2E
+        self.image_label.setScaledContents(False)
         layout.addWidget(self.image_label)
 
         # Close Button
