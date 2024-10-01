@@ -432,16 +432,29 @@ class ComparisonWidget(QWidget):
             self.image_data = image_data
             self.is_4d = image_data.ndim == 4  # Check if the image is 4D
 
-            # Set up the slice slider (Z-axis)
-            self.slice_slider.setMaximum(self.image_data.shape[2] - 1)
-            self.slice_slider.setVisible(True)
+            # Remove old sliders if they exist
+            if self.slice_slider is not None:
+                self.slice_slider.deleteLater()  # Ensure old slider is deleted
+                self.slice_slider = None  # Reset to None after deletion
+            if self.time_slider is not None:
+                self.time_slider.deleteLater()  # Ensure old slider is deleted
+                self.time_slider = None  # Reset to None after deletion
 
-            # Set up the time slider (T-axis) for 4D images
+            # Recreate the slice slider (Z-axis)
+            self.slice_slider = QSlider(Qt.Horizontal)
+            self.slice_slider.setMaximum(self.image_data.shape[2] - 1)
+            self.slice_slider.valueChanged.connect(self.update_slice)
+            self.layout().addWidget(self.slice_slider)
+
+            # Recreate the time slider (T-axis) only for 4D images
             if self.is_4d:
+                self.time_slider = QSlider(Qt.Horizontal)
                 self.time_slider.setMaximum(self.image_data.shape[3] - 1)
+                self.time_slider.valueChanged.connect(self.update_time)
+                self.layout().addWidget(self.time_slider)
                 self.time_slider.setVisible(True)
             else:
-                self.time_slider.setVisible(False)
+                self.time_slider = None
 
             # Display the initial slice and time frame
             self.update_display()
@@ -449,6 +462,12 @@ class ComparisonWidget(QWidget):
         except Exception as e:
             print(f"Failed to set comparison image: {e}")
             QMessageBox.critical(self, "Error", f"Failed to set comparison image:\n{e}")
+
+    def reconnect_signals(self):
+        """Reconnect signals for sliders."""
+        self.slice_slider.valueChanged.connect(self.update_slice)
+        if self.is_4d:
+            self.time_slider.valueChanged.connect(self.update_time)
 
     def update_slice(self, value):
         """Update the Z-axis slice index."""
@@ -463,15 +482,21 @@ class ComparisonWidget(QWidget):
     def update_display(self):
         """Update the image display based on the current slice and time index."""
         try:
+            if self.image_data is None:
+                return  # No image data to display
+
             if self.is_4d:
                 # For 4D images, use both the slice and time index
-                slice_data = self.image_data[:, :, self.slice_idx, self.time_idx]
+                if self.slice_slider and self.time_slider:
+                    slice_data = self.image_data[:, :, self.slice_slider.value(), self.time_slider.value()]
             else:
                 # For 3D images, use only the slice index
-                slice_data = self.image_data[:, :, self.slice_idx]
+                if self.slice_slider:
+                    slice_data = self.image_data[:, :, self.slice_slider.value()]
 
             # Normalize the data for display
-            normalized = ((slice_data - np.min(slice_data)) / (np.max(slice_data) - np.min(slice_data)) * 255).astype(np.uint8)
+            normalized = ((slice_data - np.min(slice_data)) / (np.max(slice_data) - np.min(slice_data)) * 255).astype(
+                np.uint8)
             height, width = normalized.shape
 
             # Ensure the data is contiguous in memory
@@ -491,9 +516,29 @@ class ComparisonWidget(QWidget):
             QMessageBox.critical(self, "Error", f"Error updating display:\n{e}")
 
     def close_comparison(self):
-        """Close the comparison area."""
-        self.hide()
-        self.parent().resize_main_image()
+        """Close the comparison area and safely clean up resources."""
+        try:
+            self.hide()  # Hide the widget from view
+
+            # Clear image data
+            self.image_data = None
+
+            # Clean up sliders properly by deleting them, but only if they exist
+            if self.slice_slider is not None:
+                self.slice_slider.deleteLater()
+                self.slice_slider = None
+            if self.time_slider is not None:
+                self.time_slider.deleteLater()
+                self.time_slider = None
+
+            # Notify the parent to resize the main image
+            parent_window = self.window()
+            if hasattr(parent_window, 'resize_main_image'):
+                parent_window.resize_main_image()
+
+        except Exception as e:
+            print(f"Error while closing comparison: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to close comparison:\n{e}")
 
 
 class NiftiViewer(QMainWindow):
@@ -538,11 +583,19 @@ class NiftiViewer(QMainWindow):
             self.load_nifti_file(initial_file)
 
     def closeEvent(self, event):
+        """Handle the closing of the widget and ensure proper cleanup."""
         try:
-            clean_nifti_dir()
-        except:
-            pass
-        event.accept()
+            # Stop any background threads or timers
+            if hasattr(self, 'background_thread') and self.background_thread.isRunning():
+                self.background_thread.quit()
+                self.background_thread.wait()
+
+            # Call parent class closeEvent
+            super().closeEvent(event)
+
+        except Exception as e:
+            print(f"Error while closing widget: {e}")
+            event.ignore()  # Ignore the close event if an error occurs
 
     def init_ui(self):
         # Main widget
@@ -597,7 +650,7 @@ class NiftiViewer(QMainWindow):
         self.splitter.addWidget(self.comparison_widget)
 
         # Set initial sizes for the splitter sections (adjusted for three panels)
-        self.splitter.setSizes([250, 800, 400])  # Start without comparison
+        self.splitter.setSizes([250, 1050, 0])  # Start without comparison
 
         # Apply default dark mode
         self.apply_dark_mode()
@@ -1109,15 +1162,6 @@ class NiftiViewer(QMainWindow):
         self.figure.patch.set_facecolor('white')
         self.ax.title.set_color('black')
         self.setStyleSheet("background-color: white; color: black;")
-
-    def resize_main_image(self):
-        """Resize the main image display to accommodate the comparison."""
-        if self.comparison_widget.isVisible():
-            # Adjust the splitter sizes to give space to both main and comparison images
-            self.splitter.setSizes([250, 800, 400])
-        else:
-            # Restore the splitter sizes when comparison is closed
-            self.splitter.setSizes([250, 1050, 0])
 
     def add_controls(self):
         # Play/Stop buttons for CINE mode
