@@ -564,9 +564,6 @@ class NiftiViewer(QMainWindow):
         # Initialize history stack
         self.history = HistoryStack()
 
-        # Add Undo/Redo actions
-        self.add_edit_menu()
-
         # Timer for frame updates
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.next_frame)
